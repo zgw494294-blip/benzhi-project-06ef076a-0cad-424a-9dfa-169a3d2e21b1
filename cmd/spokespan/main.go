@@ -51,6 +51,9 @@ func run(args []string, stdout, stderr io.Writer) int {
 		commandErr = fmt.Errorf("unknown command %q", command)
 	}
 	if commandErr != nil {
+		if errors.Is(commandErr, flag.ErrHelp) {
+			return 0
+		}
 		return writeError(stderr, commandErr)
 	}
 	return 0
