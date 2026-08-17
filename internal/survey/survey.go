@@ -146,7 +146,7 @@ func (s *Survey) Finalize() error {
 
 // SortedReadings returns a copy ordered by spoke number for stable display.
 func (s Survey) SortedReadings() []Reading {
-	readings := s.Readings
+	readings := append([]Reading(nil), s.Readings...)
 	sort.Slice(readings, func(i, j int) bool { return readings[i].Spoke < readings[j].Spoke })
 	return readings
 }
