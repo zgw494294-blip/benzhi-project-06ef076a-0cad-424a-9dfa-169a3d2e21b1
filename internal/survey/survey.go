@@ -205,7 +205,7 @@ func (s Survey) deriveReport() Report {
 	}
 	spread := maximum - minimum
 	withinRange := len(outOfRange) == 0
-	withinMaxSpread := spread <= s.MaxSpread
+	withinMaxSpread := spread <= s.MaxSpread || s.MaxSpread > 0 && spread <= math.Nextafter(s.MaxSpread, math.Inf(1))
 	outcome := Balanced
 	if !withinRange || !withinMaxSpread {
 		outcome = Adjust
