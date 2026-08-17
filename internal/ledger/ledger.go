@@ -7,6 +7,8 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"reflect"
+	"syscall"
 
 	"github.com/spokespan/spokespan/internal/survey"
 )
@@ -56,8 +58,8 @@ func (s Store) Load() (Ledger, error) {
 	return l, nil
 }
 
-// Save serializes a ledger to a sibling temporary file, syncs it, and then
-// atomically renames it over the target.
+// Save merges a ledger with any concurrent updates, serializes it to a sibling
+// temporary file, syncs it, and then atomically renames it over the target.
 func (s Store) Save(l Ledger) error {
 	if s.Path == "" {
 		return errors.New("ledger path is required")
@@ -65,6 +67,28 @@ func (s Store) Save(l Ledger) error {
 	if err := l.Validate(); err != nil {
 		return fmt.Errorf("validate ledger before save: %w", err)
 	}
+	lock, err := os.OpenFile(filepath.Clean(s.Path)+".lock", os.O_CREATE|os.O_RDWR, 0600)
+	if err != nil {
+		return fmt.Errorf("open ledger lock for %q: %w", s.Path, err)
+	}
+	defer lock.Close()
+	if err := syscall.Flock(int(lock.Fd()), syscall.LOCK_EX); err != nil {
+		return fmt.Errorf("lock ledger %q: %w", s.Path, err)
+	}
+	defer syscall.Flock(int(lock.Fd()), syscall.LOCK_UN)
+
+	current, err := s.Load()
+	if err != nil {
+		return err
+	}
+	l, err = mergeLedgers(current, l)
+	if err != nil {
+		return err
+	}
+	return s.save(l)
+}
+
+func (s Store) save(l Ledger) error {
 	data, err := json.MarshalIndent(l, "", "  ")
 	if err != nil {
 		return fmt.Errorf("encode ledger: %w", err)
@@ -104,6 +128,71 @@ func (s Store) Save(l Ledger) error {
 	}
 	temporaryName = ""
 	return nil
+}
+
+func mergeLedgers(current, next Ledger) (Ledger, error) {
+	indexes := make(map[string]int, len(current.Surveys))
+	for i := range current.Surveys {
+		indexes[current.Surveys[i].ID] = i
+	}
+	for _, candidate := range next.Surveys {
+		i, exists := indexes[candidate.ID]
+		if !exists {
+			indexes[candidate.ID] = len(current.Surveys)
+			current.Surveys = append(current.Surveys, candidate)
+			continue
+		}
+		merged, err := mergeSurveys(current.Surveys[i], candidate)
+		if err != nil {
+			return Ledger{}, err
+		}
+		current.Surveys[i] = merged
+	}
+	if err := current.Validate(); err != nil {
+		return Ledger{}, fmt.Errorf("validate merged ledger: %w", err)
+	}
+	return current, nil
+}
+
+func mergeSurveys(current, next survey.Survey) (survey.Survey, error) {
+	if !sameConfiguration(current, next) {
+		return survey.Survey{}, fmt.Errorf("merge survey %q: configuration conflict", next.ID)
+	}
+	readings := make(map[int]float64, len(current.Readings))
+	for _, reading := range current.Readings {
+		readings[reading.Spoke] = reading.Tension
+	}
+	for _, reading := range next.Readings {
+		if tension, exists := readings[reading.Spoke]; exists {
+			if tension != reading.Tension {
+				return survey.Survey{}, fmt.Errorf("merge survey %q: spoke %d reading conflict", next.ID, reading.Spoke)
+			}
+			continue
+		}
+		current.Readings = append(current.Readings, reading)
+		readings[reading.Spoke] = reading.Tension
+	}
+
+	switch {
+	case current.Status == survey.Tensioning && next.Status != survey.Tensioning:
+		current.Status = next.Status
+		current.Report = next.Report
+	case current.Status != survey.Tensioning && next.Status != survey.Tensioning:
+		if current.Status != next.Status || !reflect.DeepEqual(current.Report, next.Report) {
+			return survey.Survey{}, fmt.Errorf("merge survey %q: final report conflict", next.ID)
+		}
+	}
+	return current, nil
+}
+
+func sameConfiguration(left, right survey.Survey) bool {
+	if left.ID != right.ID || left.SpokeCount != right.SpokeCount || left.MinTension != right.MinTension || left.MaxTension != right.MaxTension || left.MaxSpread != right.MaxSpread {
+		return false
+	}
+	if left.WheelLabel == nil || right.WheelLabel == nil {
+		return left.WheelLabel == nil && right.WheelLabel == nil
+	}
+	return *left.WheelLabel == *right.WheelLabel
 }
 
 // Validate checks the document version, survey IDs, and each survey's state.
