@@ -2,9 +2,11 @@
 package ledger
 
 import (
+	"bytes"
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 
@@ -47,7 +49,15 @@ func (s Store) Load() (Ledger, error) {
 		return Ledger{}, fmt.Errorf("read ledger %q: %w", s.Path, err)
 	}
 	var l Ledger
-	if err := json.Unmarshal(data, &l); err != nil {
+	decoder := json.NewDecoder(bytes.NewReader(data))
+	decoder.DisallowUnknownFields()
+	if err := decoder.Decode(&l); err != nil {
+		return Ledger{}, fmt.Errorf("decode ledger %q: %w", s.Path, err)
+	}
+	if err := decoder.Decode(&struct{}{}); err != io.EOF {
+		if err == nil {
+			err = errors.New("multiple JSON values")
+		}
 		return Ledger{}, fmt.Errorf("decode ledger %q: %w", s.Path, err)
 	}
 	if err := l.Validate(); err != nil {
